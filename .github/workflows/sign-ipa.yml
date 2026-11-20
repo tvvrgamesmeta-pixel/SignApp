@@ -1,0 +1,104 @@
+name: Sign uploaded IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Supabase signing job UUID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sign:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare signing identity
+        env:
+          CERT_P12: ${{ secrets.SIGNING_CERTIFICATE_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
+          PROFILE: ${{ secrets.SIGNING_MOBILEPROVISION_BASE64 }}
+        run: |
+          set -euo pipefail
+          for key in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY; do
+            test -n "${!key:-}" || { echo "::error::Missing secret $key"; exit 1; }
+          done
+          test -n "$CERT_P12" && test -n "$CERT_PASSWORD" && test -n "$PROFILE"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          echo "$PROFILE" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          security create-keychain -p "$RUNNER_TEMP/keychain-pass" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$RUNNER_TEMP/keychain-pass" build.keychain
+          security import "$RUNNER_TEMP/signing.p12" -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP/keychain-pass" build.keychain
+          security find-identity -v -p codesigning build.keychain
+          echo "JOB_ID=${{ inputs.job_id }}" >> "$GITHUB_ENV"
+          echo "PROFILE_PATH=$RUNNER_TEMP/profile.mobileprovision" >> "$GITHUB_ENV"
+
+      - name: Fetch IPA from private storage
+        run: |
+          set -euo pipefail
+          JOB=$(curl --fail --silent --show-error "$SUPABASE_URL/rest/v1/sign_jobs?id=eq.$JOB_ID&select=input_path,user_id" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY")
+          INPUT_PATH=$(python3 -c 'import json,sys; x=json.load(sys.stdin); assert len(x)==1; print(x[0]["input_path"])' <<< "$JOB")
+          USER_ID=$(python3 -c 'import json,sys; x=json.load(sys.stdin); assert len(x)==1; print(x[0]["user_id"])' <<< "$JOB")
+          curl --fail --silent --show-error -X PATCH "$SUPABASE_URL/rest/v1/sign_jobs?id=eq.$JOB_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -d '{"status":"signing"}'
+          SIGNED=$(curl --fail --silent --show-error -X POST "$SUPABASE_URL/storage/v1/object/sign/ipa-jobs/$INPUT_PATH" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -d '{"expiresIn":600}')
+          URL=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["signedURL"])' <<< "$SIGNED")
+          case "$URL" in http*) ;; *) URL="$SUPABASE_URL$URL";; esac
+          curl --fail --location --silent --show-error "$URL" -o input.ipa
+          mkdir work && unzip -q input.ipa -d work
+          APP=$(find work/Payload -maxdepth 1 -type d -name '*.app' -print -quit)
+          test -n "$APP"
+          echo "APP_PATH=$APP" >> "$GITHUB_ENV"
+          echo "USER_ID=$USER_ID" >> "$GITHUB_ENV"
+
+      - name: Sign app bundle
+        run: |
+          set -euo pipefail
+          security cms -D -i "$PROFILE_PATH" > profile.plist
+          cp "$PROFILE_PATH" "$APP_PATH/embedded.mobileprovision"
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain | sed -n 's/.*) \([A-F0-9]\{40\}\) .*/\1/p' | head -1)
+          test -n "$IDENTITY" || { echo "::error::No valid signing identity found"; exit 1; }
+          find "$APP_PATH" \( -name '*.framework' -o -name '*.appex' -o -name '*.app' \) -type d -prune -print | awk '{print length, $0}' | sort -rn | cut -d' ' -f2- > nested-code.txt
+          while IFS= read -r ITEM; do
+            [ "$ITEM" = "$APP_PATH" ] && continue
+            codesign --force --sign "$IDENTITY" --preserve-metadata=identifier "$ITEM"
+          done < nested-code.txt
+          codesign --force --sign "$IDENTITY" --entitlements <( /usr/libexec/PlistBuddy -x -c 'Print :Entitlements' profile.plist ) "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          ditto -c -k --sequesterRsrc --keepParent work signed.ipa
+
+      - name: Upload signed IPA and OTA manifest
+        run: |
+          set -euo pipefail
+          IPA_PATH="$USER_ID/$JOB_ID/signed.ipa"
+          MANIFEST_PATH="$USER_ID/$JOB_ID/manifest.plist"
+          curl --fail --silent --show-error -X POST "$SUPABASE_URL/storage/v1/object/ipa-jobs/$IPA_PATH" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/octet-stream" -H "x-upsert: true" --data-binary @signed.ipa
+          IPA_SIGNED=$(curl --fail --silent --show-error -X POST "$SUPABASE_URL/storage/v1/object/sign/ipa-jobs/$IPA_PATH" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -d '{"expiresIn":3600}')
+          IPA_URL=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["signedURL"])' <<< "$IPA_SIGNED")
+          case "$IPA_URL" in http*) ;; *) IPA_URL="$SUPABASE_URL$IPA_URL";; esac
+          BUNDLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist")
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Info.plist" || echo 1)
+          cat > manifest.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>items</key><array><dict><key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>$IPA_URL</string></dict></array><key>metadata</key><dict><key>bundle-identifier</key><string>$BUNDLE</string><key>bundle-version</key><string>$VERSION</string><key>kind</key><string>software</string><key>title</key><string>Signed App</string></dict></dict></array></dict></plist>
+          PLIST
+          curl --fail --silent --show-error -X POST "$SUPABASE_URL/storage/v1/object/ipa-jobs/$MANIFEST_PATH" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/xml" -H "x-upsert: true" --data-binary @manifest.plist
+          curl --fail --silent --show-error -X PATCH "$SUPABASE_URL/rest/v1/sign_jobs?id=eq.$JOB_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -d "{\"status\":\"complete\",\"output_path\":\"$IPA_PATH\",\"manifest_path\":\"$MANIFEST_PATH\"}"
+
+      - name: Record failure
+        if: failure()
+        run: |
+          curl --silent --show-error -X PATCH "$SUPABASE_URL/rest/v1/sign_jobs?id=eq.$JOB_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -d '{"status":"failed","error_message":"Signing failed. Review the GitHub Actions run log."}' || true
+
+      - name: Clean signing material
+        if: always()
+        run: |
+          security delete-keychain build.keychain || true
+          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/profile.mobileprovision" input.ipa signed.ipa
