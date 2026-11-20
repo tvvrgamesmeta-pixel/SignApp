@@ -1,35 +1,83 @@
-name: Build SignApp iOS
+name: Build and publish SignApp iOS
+
 on:
-  workflow_dispatch:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+
 permissions:
   contents: write
+
 jobs:
   build:
     runs-on: macos-14
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - name: Install XcodeGen and SVG renderer
+
+      - name: Load signing certificate from certificate folder
+        shell: bash
         run: |
-          brew install xcodegen librsvg
-          mkdir -p ios/SignApp/Assets.xcassets/AppIcon.appiconset
-          rsvg-convert -w 1024 -h 1024 assets/signapp-icon.svg > ios/SignApp/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+          set -euo pipefail
+          CERT="certificate/Chengdu Railway Bureau.p12"
+          PROFILE="certificate/Chengdu Railway Bureau.mobileprovision"
+          PASSFILE="certificate/password.txt"
+          test -f "$CERT" || { echo "::error::Missing $CERT"; exit 1; }
+          test -f "$PROFILE" || { echo "::error::Missing $PROFILE"; exit 1; }
+          test -f "$PASSFILE" || { echo "::error::Missing $PASSFILE"; exit 1; }
+          CERT_PASSWORD="$(tr -d '\r\n' < "$PASSFILE")"
+          security create-keychain -p "$RUNNER_TEMP/keychain-pass" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$RUNNER_TEMP/keychain-pass" build.keychain
+          security import "$CERT" -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP/keychain-pass" build.keychain
+          security cms -D -i "$PROFILE" > profile.plist
+          TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' profile.plist)
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' profile.plist)
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain | sed -n 's/.*) \([A-F0-9]\{40\}\) .*/\1/p' | head -1)
+          test -n "$IDENTITY" || { echo "::error::No valid Apple signing identity in the p12"; exit 1; }
+          echo "TEAM_ID=$TEAM_ID" >> "$GITHUB_ENV"
+          echo "PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE" "$HOME/Library/MobileDevice/Provisioning Profiles/SignApp.mobileprovision"
+
       - name: Generate Xcode project
-        run: xcodegen generate
-      - name: Build archive
         run: |
-          xcodebuild -project SignApp.xcodeproj -scheme SignApp -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -archivePath build/SignApp.xcarchive CODE_SIGNING_ALLOWED=NO archive
-      - name: Export unsigned IPA
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Archive signed iOS app
         run: |
-          mkdir -p build/Payload
-          APP="$(find build/SignApp.xcarchive/Products/Applications -maxdepth 1 -name '*.app' -print -quit)"
-          cp -R "$APP" build/Payload/
-          cd build && zip -qr SignApp-unsigned.ipa Payload
-      - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
+          xcodebuild -project SignApp.xcodeproj -scheme SignApp -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -archivePath build/SignApp.xcarchive archive CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$IDENTITY" DEVELOPMENT_TEAM="$TEAM_ID" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
+
+      - name: Export installable IPA
+        run: |
+          cat > ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>method</key><string>ad-hoc</string>
+          <key>signingStyle</key><string>manual</string>
+          <key>teamID</key><string>$TEAM_ID</string>
+          <key>provisioningProfiles</key><dict><key>com.cd-rail.zhct</key><string>$PROFILE_NAME</string></dict>
+          <key>compileBitcode</key><false/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath build/SignApp.xcarchive -exportPath build/export -exportOptionsPlist ExportOptions.plist
+          cp build/export/*.ipa build/SignApp.ipa
+
+      - name: Publish installable IPA
+        uses: softprops/action-gh-release@v2
         with:
-          name: SignApp-unsigned-ipa
-          path: build/SignApp-unsigned.ipa
-          if-no-files-found: error
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}
+          name: SignApp ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}
+          make_latest: true
+          files: build/SignApp.ipa
+
+      - name: Clean signing keychain
+        if: always()
+        run: |
+          security delete-keychain build.keychain || true
+          rm -f certificate/*.p12 certificate/*.mobileprovision
