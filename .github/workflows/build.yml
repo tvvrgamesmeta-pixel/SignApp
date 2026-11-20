@@ -80,4 +80,3 @@ jobs:
         if: always()
         run: |
           security delete-keychain build.keychain || true
-          rm -f certificate/*.p12 certificate/*.mobileprovision
