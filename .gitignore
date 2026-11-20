@@ -6,3 +6,5 @@ build/
 *.mobileprovision
 password.txt
 .env
+certificate/*
+!certificate/README.md
