@@ -1,0 +1,35 @@
+name: Build SignApp iOS
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen and SVG renderer
+        run: |
+          brew install xcodegen librsvg
+          mkdir -p ios/SignApp/Assets.xcassets/AppIcon.appiconset
+          rsvg-convert -w 1024 -h 1024 assets/signapp-icon.svg > ios/SignApp/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build archive
+        run: |
+          xcodebuild -project SignApp.xcodeproj -scheme SignApp -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -archivePath build/SignApp.xcarchive CODE_SIGNING_ALLOWED=NO archive
+      - name: Export unsigned IPA
+        run: |
+          mkdir -p build/Payload
+          APP="$(find build/SignApp.xcarchive/Products/Applications -maxdepth 1 -name '*.app' -print -quit)"
+          cp -R "$APP" build/Payload/
+          cd build && zip -qr SignApp-unsigned.ipa Payload
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SignApp-unsigned-ipa
+          path: build/SignApp-unsigned.ipa
+          if-no-files-found: error
