@@ -6,7 +6,6 @@ struct SignAppApp: App {
         WindowGroup {
             SignAppWebView()
                 .ignoresSafeArea()
-                .preferredColorScheme(.dark)
         }
     }
 }
