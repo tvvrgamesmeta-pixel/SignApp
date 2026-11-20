@@ -15,7 +15,7 @@ create table if not exists public.sign_jobs (
 
 alter table public.sign_jobs enable row level security;
 revoke all on public.sign_jobs from anon;
-grant select on public.sign_jobs to authenticated;
+grant select on public.sign_jobs to authenticated;\ngrant all on public.sign_jobs to service_role;
 
 create policy "Users can view their own signing jobs"
 on public.sign_jobs for select to authenticated
