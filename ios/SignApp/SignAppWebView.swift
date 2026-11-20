@@ -144,7 +144,7 @@ struct SignAppWebView: View {
                             }.disabled(model.busy)
                             if model.busy { ProgressView().tint(.white) }
                             if let url = model.installURL {
-                                Button { UIApplication.shared.open(URL(string: "itms-services://?action=download-manifest&url=\(url.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? url.absoluteString)")!) } label: {
+                                Button { UIApplication.shared.open(URL(string: "itms-services://?action=download-manifest&url=\(url.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? url.absoluteString)")!) } label: {
                                     Label("Install Signed App", systemImage: "arrow.down.app.fill").frame(maxWidth: .infinity)
                                 }.buttonStyle(SignAppButton())
                             }
