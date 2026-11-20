@@ -8,10 +8,19 @@ A mobile-friendly IPA signing frontend and iOS wrapper project connected to the 
 2. Select an IPA file from the iOS Files app.
 3. SignApp uploads it to the private Supabase Storage bucket.
 4. An authenticated signing job is queued through GitHub Actions.
-5. A macOS runner signs the IPA using the configured Apple certificate and provisioning profile.
+5. A macOS runner loads the signing identity from the `certificate/` folder, signs the IPA, and removes the private files afterward.
 6. SignApp provides an OTA manifest. Tap **Install signed app** and confirm the iOS installation prompt.
 
 The library starts empty; there are no fake sample apps.
+
+## Certificate folder
+
+The repository contains a `certificate/` folder. During each signing run, GitHub Actions creates:
+
+- `certificate/signing.p12`
+- `certificate/profile.mobileprovision`
+
+The files are populated from protected Actions secrets at runtime and deleted at the end of the job. The `.gitignore` protects certificate and provisioning-profile files from being committed. Never upload private signing material to this public repository.
 
 ## Supabase connection
 
@@ -25,18 +34,12 @@ The database migration has been applied and both Edge Functions are deployed. Th
 
 ## Required owner setup before signing works
 
-The Supabase connection is deployed, but the signing worker still needs owner-controlled secrets.
-
-### 1. Supabase Edge Function secrets
+### Supabase Edge Function secrets
 
 In Supabase Dashboard → Edge Functions → Secrets, add:
 - **GITHUB_TOKEN** — a GitHub token with Actions read/write permission for tvvrgamesmeta-pixel/SignApp.
-- **GITHUB_REPOSITORY** — tvvrgamesmeta-pixel/SignApp.
-- **GITHUB_WORKFLOW** — sign-ipa.yml.
 
-Do not put the GitHub token in config.js or commit it to the repository.
-
-### 2. GitHub Actions repository secrets
+### GitHub Actions repository secrets
 
 In GitHub → SignApp → Settings → Secrets and variables → Actions, add:
 - **SUPABASE_URL** — https://hxjxekuvgufmnvbyzkre.supabase.co
@@ -55,6 +58,7 @@ iOS installation always requires user confirmation. Only sign apps you own or ar
 
 ## Repository layout
 
+- **certificate/** — protected signing files are materialized here only during CI signing.
 - **index.html** — responsive website, Supabase account UI, and IPA workflow.
 - **config.js** — public Supabase project URL, publishable key, and function endpoints.
 - **assets/** — app icon and favicon.
