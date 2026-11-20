@@ -59,7 +59,7 @@ The P12 and provisioning profile should be base64-encoded before being saved as 
 
 Edit `config.js`:
 - Replace `YOUR_PROJECT_REF` with the Supabase project reference.
-- Set `apiKey` to the current signed-in user's Supabase access token (JWT).
+- Set `publishableKey` to the Supabase publishable key.\n- Set `accessToken` to the current signed-in user's Supabase access token (JWT).
 
 The website sends the selected IPA as multipart form data to `upload-ipa`, then polls `signing-status`. The project owner must provide a sign-in flow and supply a valid user access token; do not put a service-role key in browser code.
 
