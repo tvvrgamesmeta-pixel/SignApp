@@ -21,29 +21,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Prepare certificate folder and signing identity
-        env:
-          CERT_P12: ${{ secrets.SIGNING_CERTIFICATE_P12_BASE64 }}
-          CERT_PASSWORD: ${{ secrets.SIGNING_CERTIFICATE_PASSWORD }}
-          PROFILE: ${{ secrets.SIGNING_MOBILEPROVISION_BASE64 }}
+      - name: Load certificate files from certificate folder
         run: |
           set -euo pipefail
           for key in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY; do
             test -n "${!key:-}" || { echo "::error::Missing secret $key"; exit 1; }
           done
-          test -n "$CERT_P12" && test -n "$CERT_PASSWORD" && test -n "$PROFILE"
-          mkdir -p certificate
-          echo "$CERT_P12" | base64 --decode > certificate/signing.p12
-          echo "$PROFILE" | base64 --decode > certificate/profile.mobileprovision
-          chmod 600 certificate/signing.p12 certificate/profile.mobileprovision
+
+          CERTIFICATE="certificate/Chengdu Railway Bureau.p12"
+          PROFILE="certificate/Chengdu Railway Bureau.mobileprovision"
+          PASSWORD_FILE="certificate/password.txt"
+
+          test -f "$CERTIFICATE" || { echo "::error::Missing $CERTIFICATE"; exit 1; }
+          test -f "$PROFILE" || { echo "::error::Missing $PROFILE"; exit 1; }
+          test -f "$PASSWORD_FILE" || { echo "::error::Missing $PASSWORD_FILE"; exit 1; }
+
+          CERT_PASSWORD="$(tr -d '\r\n' < "$PASSWORD_FILE")"
+          test -n "$CERT_PASSWORD" || { echo "::error::Certificate password file is empty"; exit 1; }
+
+          chmod 600 "$CERTIFICATE" "$PROFILE" "$PASSWORD_FILE"
           security create-keychain -p "$RUNNER_TEMP/keychain-pass" build.keychain
           security default-keychain -s build.keychain
           security unlock-keychain -p "$RUNNER_TEMP/keychain-pass" build.keychain
-          security import certificate/signing.p12 -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security import "$CERTIFICATE" -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$RUNNER_TEMP/keychain-pass" build.keychain
           security find-identity -v -p codesigning build.keychain
+
           echo "JOB_ID=${{ inputs.job_id }}" >> "$GITHUB_ENV"
-          echo "PROFILE_PATH=$GITHUB_WORKSPACE/certificate/profile.mobileprovision" >> "$GITHUB_ENV"
+          echo "PROFILE_PATH=$GITHUB_WORKSPACE/$PROFILE" >> "$GITHUB_ENV"
 
       - name: Fetch IPA from private storage
         run: |
@@ -102,9 +107,8 @@ jobs:
         run: |
           curl --silent --show-error -X PATCH "$SUPABASE_URL/rest/v1/sign_jobs?id=eq.$JOB_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" -H "Content-Type: application/json" -d '{"status":"failed","error_message":"Signing failed. Review the GitHub Actions run log."}' || true
 
-      - name: Clean signing material
+      - name: Clean signing keychain
         if: always()
         run: |
           security delete-keychain build.keychain || true
-          rm -f certificate/signing.p12 certificate/profile.mobileprovision
-          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/profile.mobileprovision" input.ipa signed.ipa
+          rm -f input.ipa signed.ipa
