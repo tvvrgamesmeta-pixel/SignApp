@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 private let supabaseURL = URL(string: "https://hxjxekuvgufmnvbyzkre.supabase.co")!
